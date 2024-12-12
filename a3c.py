@@ -12,7 +12,7 @@ GLOBAL_ITER = 32
 GAMMA = 0.99
 MAX_EPISODES = 1500
 
-env = gym.make('CartPole-v1') #create cartpole environment
+env = gym.make('CartPole-v1') #create cartpole environment for global var extraction
 
 NUMSTATES = env.observation_space.shape[0]
 NUMACTIONS = env.action_space.n
@@ -48,6 +48,7 @@ class ActorCritic(nn.Module):
         self.distribution = torch.distributions.Categorical
     
     def forward(self, state):
+        # feed-forward calculation of policy and values
         pi1 = torch.tanh(self.pi1(state))
         v1 = torch.tanh(self.v1(state))
         logits = self.pi2(pi1)
@@ -55,39 +56,40 @@ class ActorCritic(nn.Module):
         return logits, values
     
     def choose_action(self, obs):
+        #select the next action based on the current state
         self.eval()
-        #print(f'obs {obs.shape}')
-        #epsilon = 2.5e-1
         pi, _ = self.forward(obs)
-        #pi += 20
         probs = f.softmax(pi, dim=1).data
         dist = self.distribution(probs)
         #action = dist.sample().numpy()[0]
-        return dist.sample().numpy()[0]
+        return dist.sample().numpy()[0] #extract an action based on a distribution
     
     def calcLoss(self, state, action, value):
+        #calculate the actor an loss functions
+        #the functions below are trial-and-error results
+        #further refinement of loss calculations would likely improve performance
         self.train()
         pi, values = self.forward(state)
         td = value - values
-        criticLoss = (td.pow(2) * 1)
+        criticLoss = (td.pow(2) * .1)
         probs = f.softmax(pi, dim=1)
         dist = self.distribution(probs)
-        expectedVal = dist.log_prob(action) * td.detach().squeeze()
+        expectedVal = dist.log_prob(action) * td.detach().squeeze() #squeeze required for correct shape
         actorLoss = torch.mean(((-expectedVal) + (value*0.0001).pow(2)))
         totalLoss = (criticLoss + actorLoss).mean()
         return totalLoss
     
-class Agent(mp.Process):
+class Worker(mp.Process):
     def __init__(self, globalNet, optimizer, globalEpisodeIdx, globalEpisodeRewards, resultsQ, name):
-        super(Agent, self).__init__()
+        super(Worker, self).__init__()
         self.name = 'w%02i' % name
-        self.globalEpisodeIdx = globalEpisodeIdx
+        self.globalEpisodeIdx = globalEpisodeIdx # necessary due to asynchronous threads
         self.globalEpisodeRewards = globalEpisodeRewards
         self.resultsQ = resultsQ
         self.globalNet = globalNet
         self.optimizer = optimizer
         self.net = ActorCritic(NUMSTATES, NUMACTIONS)
-        self.env = gym.make('CartPole-v1', render_mode='rgb_array')
+        self.env = gym.make('CartPole-v1', render_mode='human')
 
     def run(self):
         step = 1
@@ -96,9 +98,10 @@ class Agent(mp.Process):
             bufferStates, bufferActions, bufferRewards = [], [], []
             episodeReward = 0
             while True:
-                if self.name == 'w00':
-                    self.env.render()
-                    pass
+                #artifact of previous implementation
+                #if self.name == 'w00':
+                #    self.env.render() 
+                #    pass
                 action = self.net.choose_action(wrapVals(state[None, :]))
                 #print(action)
                 nextState, reward, done, _, _ = self.env.step(action.item())
@@ -129,9 +132,9 @@ class Agent(mp.Process):
                         break
                 state = nextState
                 step += 1
-                #self.env.render()
         self.resultsQ.put(None)
 
+# Helper functions; to be used for further RL implementations
 def wrapVals(array, dtype=np.float32):
         if array.dtype != dtype:
             array = array.astype(dtype)
@@ -167,7 +170,7 @@ def getResults(globalEpisodeIdx, globalEpisodeReward, episodeReward, resultsQ, w
             if globalEpisodeReward.value == 0.:
                 globalEpisodeReward.value = episodeReward
             else:
-                globalEpisodeReward.value = globalEpisodeReward.value * 0.95 + episodeReward * 0.05
+                globalEpisodeReward.value = globalEpisodeReward.value * 0.95 + episodeReward * 0.05 # rebalancing of global reward for stability
         resultsQ.put(globalEpisodeReward.value)
         print(
             workerName,
@@ -179,11 +182,11 @@ def getResults(globalEpisodeIdx, globalEpisodeReward, episodeReward, resultsQ, w
 if __name__ == '__main__':
     globalNet = ActorCritic(NUMSTATES, NUMACTIONS)
     globalNet.share_memory()
-    optimizer = SharedAdam(globalNet.parameters(), lr=5e-5, betas=(0.6, 0.85))
+    optimizer = SharedAdam(globalNet.parameters(), lr=5e-5, betas=(0.6, 0.85)) # hyperparameters determined through trial and error
     globalEpisodeIdx, globalEpisodeRewards, resultsQ = mp.Value('i', 0), mp.Value('d', 0.), mp.Queue()
     nonAve = mp.Queue()
     # parallel operation
-    workers = [Agent(globalNet, optimizer, globalEpisodeIdx, globalEpisodeRewards, resultsQ, i) for i in range(4)]
+    workers = [Worker(globalNet, optimizer, globalEpisodeIdx, globalEpisodeRewards, resultsQ, i) for i in range(4)]
     [w.start() for w in workers]
     results = []
     nonAverage = []
