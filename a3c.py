@@ -1,4 +1,4 @@
-import torch, os, matplotlib, math
+import torch, os, matplotlib
 import torch.nn as nn
 import torch.nn.functional as f
 import torch.multiprocessing as mp
